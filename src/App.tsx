@@ -1,167 +1,196 @@
-import { useState, useEffect } from "react";
-import { useKV } from "@github/spark/hooks";
+import { useState, useCallback } from "react";
 import { Header } from "@/components/Header";
 import { Sidebar } from "@/components/Sidebar";
 import { TopicContent } from "@/components/TopicContent";
 import { NotesDialog } from "@/components/NotesDialog";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
-import { jvmCurriculum, type UserProgress, calculateProgress, getNextTopic } from "@/lib/curriculum";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { LoadingSpinner } from "@/components/LoadingSpinner";
+import { useLearningContainer } from "@/hooks/useLearningContainer";
+import { useAsync } from "@/hooks/useAsync";
 import { toast } from "sonner";
 
+/**
+ * メインアプリケーションコンポーネント
+ * Clean Architectureの原則に従い、ビジネスロジックをユースケースに委譲
+ */
 function App() {
-  const [userProgress, setUserProgress] = useKV<UserProgress>("jvm-learning-progress", {
-    completedTopics: new Set(),
-    currentModule: null,
-    currentTopic: null,
-    notes: {},
-    lastAccessed: new Date()
-  });
-
+  const { learningUseCase, curriculumService } = useLearningContainer();
   const [showNotes, setShowNotes] = useState(false);
 
-  // Convert Set to Array for serialization compatibility
-  useEffect(() => {
-    if (userProgress && Array.isArray(userProgress.completedTopics)) {
-      setUserProgress((prev) => ({
-        ...prev,
-        completedTopics: new Set(prev.completedTopics)
-      }));
-    }
+  // 学習進捗の取得
+  const { data: progressData, loading, error, execute: refreshProgress } = useAsync(
+    () => learningUseCase.getProgress(),
+    []
+  );
+
+  // セキュリティ：エラー処理の強化
+  const handleError = useCallback((error: Error, action: string) => {
+    console.error(`${action} failed:`, error);
+    toast.error(`${action}に失敗しました。もう一度お試しください。`);
   }, []);
 
-  const progress = calculateProgress(userProgress);
-  const hasStarted = userProgress.currentModule !== null;
-
-  const handleStartLearning = () => {
-    const firstModule = jvmCurriculum[0];
-    const firstTopic = firstModule.topics[0];
-    
-    setUserProgress((prev) => ({
-      ...prev,
-      currentModule: firstModule.id,
-      currentTopic: firstTopic.id,
-      lastAccessed: new Date()
-    }));
-    
-    toast.success("学習を開始しました！");
-  };
-
-  const handleSelectTopic = (moduleId: string, topicId: string) => {
-    setUserProgress((prev) => ({
-      ...prev,
-      currentModule: moduleId,
-      currentTopic: topicId,
-      lastAccessed: new Date()
-    }));
-  };
-
-  const handleTopicComplete = () => {
-    if (!userProgress.currentTopic) return;
-
-    const newCompletedTopics = new Set(userProgress.completedTopics);
-    newCompletedTopics.add(userProgress.currentTopic);
-
-    setUserProgress((prev) => ({
-      ...prev,
-      completedTopics: Array.from(newCompletedTopics), // Convert to array for serialization
-      lastAccessed: new Date()
-    }));
-
-    toast.success("トピックを完了しました！");
-  };
-
-  const handleSaveNote = (note: string) => {
-    if (!userProgress.currentTopic) return;
-
-    setUserProgress((prev) => ({
-      ...prev,
-      notes: {
-        ...prev.notes,
-        [prev.currentTopic!]: note
-      },
-      lastAccessed: new Date()
-    }));
-
-    toast.success("ノートを保存しました");
-  };
-
-  const handleNavigateNext = () => {
-    if (!userProgress.currentModule || !userProgress.currentTopic) return;
-
-    const nextTopic = getNextTopic(userProgress.currentModule, userProgress.currentTopic);
-    if (nextTopic) {
-      handleSelectTopic(nextTopic.moduleId, nextTopic.topicId);
-      toast.success("次のトピックに進みました");
+  // 学習開始のハンドラー
+  const handleStartLearning = useCallback(async () => {
+    try {
+      await learningUseCase.startLearning();
+      await refreshProgress();
+      toast.success("学習を開始しました！");
+    } catch (error) {
+      handleError(error as Error, "学習開始");
     }
-  };
+  }, [learningUseCase, refreshProgress, handleError]);
 
-  const handleDeleteNote = (topicId: string) => {
-    setUserProgress((prev) => {
-      const newNotes = { ...prev.notes };
-      delete newNotes[topicId];
-      return {
-        ...prev,
-        notes: newNotes,
-        lastAccessed: new Date()
-      };
-    });
-    
-    toast.success("ノートを削除しました");
-  };
+  // トピック選択のハンドラー
+  const handleSelectTopic = useCallback(async (moduleId: string, topicId: string) => {
+    try {
+      await learningUseCase.selectTopic(moduleId, topicId);
+      await refreshProgress();
+    } catch (error) {
+      handleError(error as Error, "トピック選択");
+    }
+  }, [learningUseCase, refreshProgress, handleError]);
 
-  // Ensure completedTopics is a Set for UI components
-  const uiUserProgress = {
-    ...userProgress,
-    completedTopics: new Set(userProgress.completedTopics)
-  };
+  // トピック完了のハンドラー
+  const handleTopicComplete = useCallback(async () => {
+    if (!progressData?.userProgress.currentTopic) return;
+
+    try {
+      await learningUseCase.completeTopic(progressData.userProgress.currentTopic);
+      await refreshProgress();
+      toast.success("トピックを完了しました！");
+    } catch (error) {
+      handleError(error as Error, "トピック完了");
+    }
+  }, [learningUseCase, progressData?.userProgress.currentTopic, refreshProgress, handleError]);
+
+  // ノート保存のハンドラー
+  const handleSaveNote = useCallback(async (note: string) => {
+    if (!progressData?.userProgress.currentTopic) return;
+
+    try {
+      await learningUseCase.saveNote(progressData.userProgress.currentTopic, note);
+      await refreshProgress();
+      toast.success("ノートを保存しました");
+    } catch (error) {
+      handleError(error as Error, "ノート保存");
+    }
+  }, [learningUseCase, progressData?.userProgress.currentTopic, refreshProgress, handleError]);
+
+  // 次のトピックへの移動
+  const handleNavigateNext = useCallback(async () => {
+    try {
+      const success = await learningUseCase.navigateToNext();
+      if (success) {
+        await refreshProgress();
+        toast.success("次のトピックに進みました");
+      } else {
+        toast.info("これが最後のトピックです");
+      }
+    } catch (error) {
+      handleError(error as Error, "次のトピックへの移動");
+    }
+  }, [learningUseCase, refreshProgress, handleError]);
+
+  // ノート削除のハンドラー
+  const handleDeleteNote = useCallback(async (topicId: string) => {
+    try {
+      await learningUseCase.deleteNote(topicId);
+      await refreshProgress();
+      toast.success("ノートを削除しました");
+    } catch (error) {
+      handleError(error as Error, "ノート削除");
+    }
+  }, [learningUseCase, refreshProgress, handleError]);
+
+  // ローディング状態
+  if (loading) {
+    return <LoadingSpinner />;
+  }
+
+  // エラー状態
+  if (error) {
+    return (
+      <ErrorBoundary>
+        <div className="min-h-screen bg-background flex items-center justify-center">
+          <div className="text-center">
+            <h2 className="text-xl font-semibold text-foreground mb-2">
+              アプリケーションの読み込みに失敗しました
+            </h2>
+            <p className="text-muted-foreground mb-4">
+              ページを再読み込みしてください
+            </p>
+            <button
+              onClick={() => window.location.reload()}
+              className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+            >
+              再読み込み
+            </button>
+          </div>
+        </div>
+      </ErrorBoundary>
+    );
+  }
+
+  if (!progressData) {
+    return <LoadingSpinner />;
+  }
+
+  const hasStarted = progressData.userProgress.hasStarted();
 
   if (!hasStarted) {
     return (
-      <div className="min-h-screen bg-background">
-        <Header progress={0} onShowNotes={() => setShowNotes(true)} />
-        <WelcomeScreen onStartLearning={handleStartLearning} />
-        <NotesDialog
-          isOpen={showNotes}
-          onClose={() => setShowNotes(false)}
-          notes={userProgress.notes}
-          onDeleteNote={handleDeleteNote}
-        />
-      </div>
+      <ErrorBoundary>
+        <div className="min-h-screen bg-background">
+          <Header progress={0} onShowNotes={() => setShowNotes(true)} />
+          <WelcomeScreen onStartLearning={handleStartLearning} />
+          <NotesDialog
+            isOpen={showNotes}
+            onClose={() => setShowNotes(false)}
+            notes={progressData.userProgress.notes}
+            onDeleteNote={handleDeleteNote}
+          />
+        </div>
+      </ErrorBoundary>
     );
   }
 
   return (
-    <div className="min-h-screen bg-background">
-      <Header progress={progress} onShowNotes={() => setShowNotes(true)} />
-      
-      <div className="flex">
-        <Sidebar
-          completedTopics={uiUserProgress.completedTopics}
-          currentModule={userProgress.currentModule}
-          currentTopic={userProgress.currentTopic}
-          onSelectTopic={handleSelectTopic}
-        />
+    <ErrorBoundary>
+      <div className="min-h-screen bg-background">
+        <Header progress={progressData.overallProgress} onShowNotes={() => setShowNotes(true)} />
         
-        {userProgress.currentModule && userProgress.currentTopic && (
-          <TopicContent
-            moduleId={userProgress.currentModule}
-            topicId={userProgress.currentTopic}
-            isCompleted={uiUserProgress.completedTopics.has(userProgress.currentTopic)}
-            userNote={userProgress.notes[userProgress.currentTopic] || ""}
-            onComplete={handleTopicComplete}
-            onSaveNote={handleSaveNote}
-            onNavigateNext={handleNavigateNext}
+        <div className="flex">
+          <Sidebar
+            completedTopics={progressData.userProgress.completedTopics}
+            currentModule={progressData.userProgress.currentModule}
+            currentTopic={progressData.userProgress.currentTopic}
+            modules={curriculumService.getAllModules()}
+            onSelectTopic={handleSelectTopic}
           />
-        )}
-      </div>
+          
+          {progressData.userProgress.currentModule && progressData.userProgress.currentTopic && (
+            <TopicContent
+              moduleId={progressData.userProgress.currentModule}
+              topicId={progressData.userProgress.currentTopic}
+              curriculumService={curriculumService}
+              isCompleted={progressData.userProgress.isTopicCompleted(progressData.userProgress.currentTopic)}
+              userNote={progressData.userProgress.getNoteForTopic(progressData.userProgress.currentTopic)}
+              onComplete={handleTopicComplete}
+              onSaveNote={handleSaveNote}
+              onNavigateNext={handleNavigateNext}
+            />
+          )}
+        </div>
 
-      <NotesDialog
-        isOpen={showNotes}
-        onClose={() => setShowNotes(false)}
-        notes={userProgress.notes}
-        onDeleteNote={handleDeleteNote}
-      />
-    </div>
+        <NotesDialog
+          isOpen={showNotes}
+          onClose={() => setShowNotes(false)}
+          notes={progressData.userProgress.notes}
+          onDeleteNote={handleDeleteNote}
+        />
+      </div>
+    </ErrorBoundary>
   );
 }
 
